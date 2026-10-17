@@ -1,0 +1,21 @@
+# Data (too large for git; rebuild with the scripts in src/data)
+data/raw/*
+data/interim/*
+data/processed/*
+!data/**/.gitkeep
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.vscode/

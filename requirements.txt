@@ -1,0 +1,25 @@
+# Phase 1: data
+pandas>=2.1
+numpy>=1.26
+pyarrow>=14
+zstandard>=0.22
+yfinance>=0.2.40
+pandas_market_calendars>=4.4
+
+# Dev
+pytest>=8
+jupyter
+matplotlib
+
+# Later phases (uncomment when you get there)
+# vaderSentiment
+# transformers
+# torch
+# bertopic
+# datasketch          # MinHash for near-duplicate text
+# scikit-learn        # Isolation Forest
+# statsmodels         # regressions, Granger tests
+# linearmodels        # panel regressions with fixed effects
+# lightgbm
+# alpaca-py           # Phase 7 paper trading
+# python-dotenv
