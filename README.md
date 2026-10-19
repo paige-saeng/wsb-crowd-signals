@@ -62,6 +62,41 @@ estimated before the earliest events. The script prints a coverage report;
 tickers with no data (usually delisted ones) are your survivorship-bias gap.
 In Phase 2 the ticker list will come from the tickers WSB actually mentions.
 
+## Phase 2: ticker extraction
+
+1. Download the free NASDAQ Trader symbol lists into `data/raw/`:
+   [nasdaqlisted.txt](https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt) and
+   [otherlisted.txt](https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt).
+   They list only stocks listed *today*, so add delisted meme names with `--extra`.
+2. Run the extractor on the Phase 1 output:
+
+```bash
+python -m src.nlp.tickers \
+  --inputs data/interim/posts.parquet data/interim/comments.parquet \
+  --symbols data/raw/nasdaqlisted.txt data/raw/otherlisted.txt \
+  --extra BBBY --out data/processed
+```
+
+Writes `data/processed/mentions.parquet` (one row per post/comment and ticker)
+and `data/processed/daily_mentions.parquet` (mentions and unique authors per
+ticker per trading day), and prints the top 20 tickers.
+
+**How matching works:** cashtags (`$GME`) always count; bare ALL-CAPS symbols
+count unless they're on a stoplist of words and slang (DD, YOLO, CEO, ALL, IT…);
+a short list of distinctive symbols (gme, amc, pltr…) also counts in lowercase.
+Links, emails, and r/ or u/ references are ignored. Each ticker counts once per
+post or comment.
+
+**Validate it (required before trusting results):** draw a sample, hand-label
+it, and measure precision and recall.
+
+```python
+from src.nlp.tickers import sample_for_labeling, score_labels
+sample_for_labeling(comments, universe, n=300).to_csv("data/interim/label_sample.csv", index=False)
+# fill the true_tickers column in Excel/Sheets, then:
+score_labels(pd.read_csv("data/interim/label_sample_labeled.csv"))
+```
+
 ## The timestamp rule (lookahead bias)
 
 Every post and comment gets a `trading_day`: **the first trading session whose

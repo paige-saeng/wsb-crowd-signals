@@ -34,7 +34,7 @@ def dumps(tmp_path):
         {"id": "aaa", "created_utc": epoch("2021-01-27 07:00"), "author": "u1",
          "title": "Daily Discussion Thread for January 27, 2021", "selftext": "",
          "score": 10, "num_comments": 50000, "link_flair_text": "Daily Discussion"},
-        {"id": "bbb", "created_utc": epoch("2021-01-27 17:00"), "author": "u2",
+        {"id": "bbb", "created_utc": epoch("2021-01-27 17:00"), "author": "AutoModerator",
          "title": "What Are Your Moves Tomorrow, January 28, 2021", "selftext": "",
          "score": 5, "num_comments": 30000, "link_flair_text": None},
         {"id": "ccc", "created_utc": epoch("2021-01-27 12:00"), "author": "[deleted]",
@@ -120,3 +120,18 @@ def test_kaggle_csv(tmp_path):
     df = load_kaggle_csv(path)
     assert df.loc[0, "trading_day"] == pd.Timestamp("2021-02-01")
     assert df.loc[0, "text"] == ""
+
+
+def test_daily_threads_rejects_user_lookalikes():
+    posts = pd.DataFrame({
+        "id": ["off", "unpinned", "overflow", "fake1", "fake2"],
+        "author": ["VisualMod", "AutoModerator", "premier_", "kickrocks13", "grifev2019"],
+        "title": ["Daily Discussion Thread for March 3, 2021",
+                  "Unpinned Daily Discussion Thread for February 01, 2021",
+                  "The GME Thread Part 2 for January 26, 2021",
+                  "Where is the Daily Discussion Thread?",
+                  "AMC DAILY THREAD... daily discussion for AMC"],
+        "flair": ["Daily Discussion", "Discussion", "Daily Discussion", "Discussion", "YOLO"],
+    })
+    assert set(daily_threads(posts)["id"]) == {"off", "unpinned", "overflow"}
+    assert len(daily_threads(posts, loose=True)) == 5

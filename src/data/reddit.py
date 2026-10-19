@@ -49,6 +49,10 @@ DAILY_THREAD_RE = re.compile(
     r"daily discussion|what are your moves tomorrow|weekend discussion",
     re.IGNORECASE,
 )
+DAILY_FLAIRS = frozenset({"Daily Discussion", "Weekend Discussion"})
+# Accounts that post the official threads. Checked against 2021 data; if you
+# extend the window, rerun the audit in the README to see if this changed.
+MOD_AUTHORS = frozenset({"AutoModerator", "VisualMod", "OPINION_IS_UNPOPULAR"})
 
 DELETED_MARKERS = {"[deleted]", "[removed]"}
 
@@ -201,12 +205,27 @@ def is_daily_thread(title) -> bool:
     return isinstance(title, str) and bool(DAILY_THREAD_RE.search(title))
 
 
-def daily_threads(posts: pd.DataFrame) -> pd.DataFrame:
-    """Posts that are Daily Discussion / Moves Tomorrow / Weekend threads."""
-    mask = posts["title"].map(is_daily_thread) | posts["flair"].fillna("").str.contains(
-        "daily discussion", case=False
-    )
-    return posts[mask.astype(bool)]
+def daily_threads(posts: pd.DataFrame, loose: bool = False) -> pd.DataFrame:
+    """Official Daily Discussion / Moves Tomorrow / Weekend threads.
+
+    A post counts if EITHER
+      - its flair is "Daily Discussion" or "Weekend Discussion" (this also
+        catches the squeeze-era overflow threads like "The GME Thread Part 2",
+        which volunteers posted with the flair), OR
+      - a moderator account posted it with a daily-thread title (catches
+        AutoModerator's "Unpinned Daily Discussion" threads, which lack flair).
+
+    Title matching alone is NOT enough: in 2021 about 170 user posts had titles
+    like "Where is the Daily Discussion thread?" or "AMC DAILY THREAD".
+    Pass loose=True to get the old title-or-flair behaviour.
+    """
+    flair = posts["flair"].fillna("")
+    title_match = posts["title"].map(is_daily_thread).astype(bool)
+    if loose:
+        return posts[title_match | flair.str.contains("daily discussion", case=False)]
+    by_flair = flair.isin(DAILY_FLAIRS)
+    by_mod = posts["author"].isin(MOD_AUTHORS).fillna(False).astype(bool) & title_match
+    return posts[(by_flair | by_mod).astype(bool)]
 
 
 def comments_in_threads(comments: pd.DataFrame, threads: pd.DataFrame) -> pd.DataFrame:
