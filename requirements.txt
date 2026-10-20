@@ -12,6 +12,7 @@ jupyter
 matplotlib
 
 # Later phases (uncomment when you get there)
+# wordfreq            # only to regenerate src/nlp/data/common_words.txt
 # vaderSentiment
 # transformers
 # torch

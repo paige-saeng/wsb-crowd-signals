@@ -53,14 +53,27 @@ NFT PDT HFT MM MMS SI CTB FTD FTDS DRS
 # Keep this short and deliberate.
 LOWERCASE_OK = frozenset("""
 GME AMC BB BBBY NOK PLTR TSLA NVDA AAPL MSFT AMD SPY QQQ NIO KOSS EXPR NAKD
-CLOV WISH SNDL TLRY RKT MVIS SPCE CLNE WKHS UWMC
+CLOV SNDL TLRY RKT MVIS SPCE CLNE WKHS UWMC
 """.split())
 
+# Cashtags used as jokes, not stocks. Dropped entirely, cashtags included.
+# "$ROPE" is WSB dark humor about losses (88% of its 2021 mentions are cashtags).
+EXCLUDE = frozenset({"ROPE"})
+
 CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Za-z]{1,5})(?![\w])")
-BARE_UPPER_RE = re.compile(r"(?<![\w$])([A-Z]{2,5})(?![\w])")
-BARE_ANY_RE = re.compile(r"(?<![\w$])([A-Za-z]{2,5})(?![\w])")
+BARE_UPPER_RE = re.compile(r"(?<![\w$])(?<![A-Za-z]['’])([A-Z]{2,5})(?![\w])(?!['’](?![sS]\b)[A-Za-z])")
+BARE_ANY_RE = re.compile(r"(?<![\w$])(?<![A-Za-z]['’])([A-Za-z]{2,5})(?![\w])(?!['’](?![sS]\b)[A-Za-z])")
 # Links, emails, and Reddit user/sub references carry no ticker signal.
 NOISE_RE = re.compile(r"https?://\S+|www\.\S+|\S+@\S+|\b[ur]/\w+", re.IGNORECASE)
+
+
+COMMON_WORDS_PATH = Path(__file__).parent / "data" / "common_words.txt"
+
+
+def load_common_words(path: str | Path = COMMON_WORDS_PATH) -> frozenset[str]:
+    """2-5 letter common English words, uppercase (see data/common_words.txt)."""
+    lines = Path(path).read_text().split()
+    return frozenset(w.strip().upper() for w in lines if w.strip() and not w.startswith("#"))
 
 
 @dataclass(frozen=True)
@@ -179,13 +192,41 @@ def daily_mention_counts(mentions: pd.DataFrame) -> pd.DataFrame:
 
 # ------------------------------------------------------------------ validation
 
+def predict(
+    text: str | None,
+    universe: frozenset[str],
+    cashtag_only: frozenset[str] = frozenset(),
+    exclude: frozenset[str] = EXCLUDE,
+) -> list[str]:
+    """What the FULL pipeline outputs for one text: extraction, then the
+    ambiguity filter (`cashtag_only` = tickers whose decision was
+    "cashtags only", from ambiguous_ticker_decisions.csv) and the exclude list.
+    """
+    out = []
+    for m in find_tickers(text, universe):
+        if m.ticker in exclude:
+            continue
+        if m.ticker in cashtag_only and m.source != "cashtag":
+            continue
+        out.append(m.ticker)
+    return out
+
+
+def load_cashtag_only(decisions_csv: str | Path) -> frozenset[str]:
+    """Tickers limited to cashtags, from the decisions file `finalize` writes."""
+    d = pd.read_csv(decisions_csv, index_col=0)
+    return frozenset(d.index[d["decision"] == "cashtags only"])
+
+
 def sample_for_labeling(
     df: pd.DataFrame, universe: frozenset[str], n: int = 300, seed: int = 0,
     text_cols: tuple[str, ...] = ("title", "text"),
+    cashtag_only: frozenset[str] = frozenset(),
+    exclude: frozenset[str] = EXCLUDE,
 ) -> pd.DataFrame:
-    """Random sample with the extractor's predictions and an empty column for
-    your hand labels. Save it, fill `true_tickers` (space-separated, blank if
-    none) in a spreadsheet, then pass it to `score_labels`.
+    """Random sample with the pipeline's predictions and an empty column for
+    your hand labels. Fill `true_tickers` (space-separated, blank if none),
+    then score with `score_labels(load_labels(path))`.
 
     Half the sample is drawn from texts with at least one prediction so the
     rare false positives show up often enough to measure.
@@ -193,8 +234,9 @@ def sample_for_labeling(
     cols = [c for c in text_cols if c in df.columns]
     base = df.assign(_text=df[cols].fillna("").astype(str).agg("\n".join, axis=1))
     base = base[base["_text"].str.strip().str.len() > 0]
+    base = base[~base["_text"].str.strip().isin(["[deleted]", "[removed]"])]
     base = base.assign(predicted=base["_text"].map(
-        lambda t: " ".join(m.ticker for m in find_tickers(t, universe))))
+        lambda t: " ".join(predict(t, universe, cashtag_only, exclude))))
     hit = base[base["predicted"] != ""]
     miss = base[base["predicted"] == ""]
     k = min(n // 2, len(hit))
@@ -203,6 +245,66 @@ def sample_for_labeling(
         miss.sample(min(n - k, len(miss)), random_state=seed),
     ]).sample(frac=1, random_state=seed)
     return sample[["id", "_text", "predicted"]].rename(columns={"_text": "text"}).assign(true_tickers="")
+
+
+def ticker_source_stats(mentions: pd.DataFrame) -> pd.DataFrame:
+    """Per ticker: mentions by source and the share that were cashtags."""
+    st = mentions.groupby(["ticker", "source"]).size().unstack(fill_value=0)
+    for col in ("cashtag", "bare", "lowercase"):
+        if col not in st.columns:
+            st[col] = 0
+    st["total"] = st[["cashtag", "bare", "lowercase"]].sum(axis=1)
+    st["cashtag_share"] = st["cashtag"] / st["total"]
+    return st[["total", "cashtag", "bare", "lowercase", "cashtag_share"]]
+
+
+def drop_ambiguous(
+    mentions: pd.DataFrame,
+    common_words: frozenset[str] | None = None,
+    allow: frozenset[str] = LOWERCASE_OK,
+    min_cashtag_share: float = 0.05,
+    min_cashtags: int = 20,
+    exclude: frozenset[str] = EXCLUDE,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Remove non-cashtag mentions of tickers that are probably just words.
+
+    A ticker is AMBIGUOUS if it is a common English word (JUST, TIME, LINE) or
+    only two letters (TD, HF, PM), and is not on the allow list.
+    An ambiguous ticker keeps its bare/lowercase mentions only if the crowd
+    itself treats it as a ticker: at least `min_cashtag_share` of its mentions
+    are cashtags AND at least `min_cashtags` cashtags overall. Its cashtag
+    mentions are always kept.
+
+    Why cashtag share: in 2021 WSB data real tickers that are also words are
+    cashtagged 8-15% of the time (HOOD, COIN, PLUG, NET), while words are
+    almost never cashtagged (JUST, TIME, LINE 0%; GAME, MEME 2%).
+
+    Tickers in `exclude` (joke cashtags) are removed entirely.
+
+    Returns (filtered mentions, decisions table for the write-up).
+    """
+    if common_words is None:
+        common_words = load_common_words()
+    excluded = mentions["ticker"].isin(exclude)
+    n_excluded = mentions[excluded].groupby("ticker").size()
+    mentions = mentions[~excluded]
+    st = ticker_source_stats(mentions)
+    idx = st.index.to_series()
+    ambiguous = (idx.isin(common_words) | (idx.str.len() == 2)) & ~idx.isin(allow)
+    passes = (st["cashtag_share"] >= min_cashtag_share) & (st["cashtag"] >= min_cashtags)
+    st["ambiguous"] = ambiguous
+    st["decision"] = "keep"
+    st.loc[ambiguous & passes, "decision"] = "keep (cashtag evidence)"
+    st.loc[ambiguous & ~passes, "decision"] = "cashtags only"
+    cashtag_only = set(st.index[st["decision"] == "cashtags only"])
+    drop = mentions["ticker"].isin(cashtag_only) & (mentions["source"] != "cashtag")
+    st["dropped"] = mentions[drop].groupby("ticker").size().reindex(st.index, fill_value=0)
+    decisions = st[st["ambiguous"]].sort_values("total", ascending=False)
+    if len(n_excluded):
+        ex = pd.DataFrame({"total": n_excluded, "dropped": n_excluded,
+                           "ambiguous": True, "decision": "excluded (joke cashtag)"})
+        decisions = pd.concat([ex, decisions])
+    return mentions[~drop].reset_index(drop=True), decisions
 
 
 def run_on_parquet(
@@ -230,9 +332,23 @@ def run_on_parquet(
             print(f"  {path}: {sum(len(p) for p in parts):,} mentions so far", flush=True)
     mentions = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(
         columns=["id", "kind", "trading_day", "author", "score", "ticker", "source"])
-    mentions.to_parquet(out_dir / "mentions.parquet", index=False)
-    daily = daily_mention_counts(mentions)
+    mentions.to_parquet(out_dir / "mentions_raw.parquet", index=False)
+    return finalize(mentions, out_dir)
+
+
+def finalize(mentions: pd.DataFrame, out_dir: str | Path, **filter_kwargs) -> pd.DataFrame:
+    """Apply the ambiguity filter and write mentions, daily counts, decisions."""
+    out_dir = Path(out_dir)
+    n_in = len(mentions)
+    kept, decisions = drop_ambiguous(mentions, **filter_kwargs)
+    decisions.to_csv(out_dir / "ambiguous_ticker_decisions.csv")
+    kept.to_parquet(out_dir / "mentions.parquet", index=False)
+    daily = daily_mention_counts(kept)
     daily.to_parquet(out_dir / "daily_mentions.parquet", index=False)
+    dropped = n_in - len(kept)
+    print(f"ambiguity filter: dropped {dropped:,} of {n_in:,} mentions ({dropped / max(n_in, 1):.1%}); "
+          f"{(decisions['decision'] == 'cashtags only').sum():,} tickers limited to cashtags; "
+          f"excluded: {', '.join(decisions.index[decisions['decision'].str.startswith('excluded')]) or 'none'}")
     return daily
 
 
@@ -245,19 +361,43 @@ def main(argv=None):
                "data/interim/comments.parquet --symbols data/raw/nasdaqlisted.txt "
                "data/raw/otherlisted.txt --extra BBBY --out data/processed",
     )
-    p.add_argument("--inputs", nargs="+", required=True)
-    p.add_argument("--symbols", nargs="+", required=True,
+    p.add_argument("--inputs", nargs="+")
+    p.add_argument("--symbols", nargs="+",
                    help="NASDAQ Trader nasdaqlisted.txt / otherlisted.txt files")
     p.add_argument("--extra", nargs="*", default=["BBBY"],
                    help="Delisted or missing tickers to add to the universe")
     p.add_argument("--out", default="data/processed")
+    p.add_argument("--skip-extract", action="store_true",
+                   help="Reuse OUT/mentions_raw.parquet and only redo the ambiguity filter")
     args = p.parse_args(argv)
 
-    universe = build_universe(load_nasdaqtrader(*args.symbols), extra=args.extra)
-    print(f"universe: {len(universe):,} symbols")
-    daily = run_on_parquet(args.inputs, universe, args.out)
+    if args.skip_extract:
+        raw = pd.read_parquet(Path(args.out) / "mentions_raw.parquet")
+        daily = finalize(raw, args.out)
+    else:
+        if not args.inputs or not args.symbols:
+            p.error("--inputs and --symbols are required unless --skip-extract")
+        universe = build_universe(load_nasdaqtrader(*args.symbols), extra=args.extra)
+        print(f"universe: {len(universe):,} symbols")
+        daily = run_on_parquet(args.inputs, universe, args.out)
     top = daily.groupby("ticker")["mentions"].sum().sort_values(ascending=False).head(20)
     print("\nTop 20 tickers by total mentions:\n" + top.to_string())
+
+
+def load_labels(path: str | Path, sheet: str = "Label") -> pd.DataFrame:
+    """Read a filled-in labeling file (.xlsx or .csv).
+
+    Keeps only rows marked done (an "x" in the `checked` column) and skips the
+    example row. Blank `true_tickers` on a checked row means "no tickers".
+    """
+    path = Path(path)
+    df = pd.read_excel(path, sheet_name=sheet, dtype=str) if path.suffix == ".xlsx" else pd.read_csv(path, dtype=str)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if "id" in df.columns:
+        df = df[df["id"].fillna("").str.upper() != "EXAMPLE"]
+    if "checked" in df.columns:
+        df = df[df["checked"].fillna("").str.strip().str.lower() == "x"]
+    return df.fillna({"predicted": "", "true_tickers": ""})
 
 
 def score_labels(labeled: pd.DataFrame) -> dict:
