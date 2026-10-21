@@ -255,3 +255,16 @@ def test_repredict_uses_current_pipeline():
     new = repredict(lab, build_universe(["WISH", "WKHS"]))
     assert new["predicted"].tolist() == ["WISH WKHS", ""]
     assert score_labels(new)["recall"] == 1.0
+
+
+def test_jargon_is_cashtag_only_even_with_no_word_match():
+    from src.nlp.tickers import drop_ambiguous, JARGON
+    assert "TDA" in JARGON
+    m = make_mentions([("TDA", "bare", 300), ("TDA", "cashtag", 40), ("MRVI", "bare", 500)])
+    kept, dec = drop_ambiguous(m, common_words=frozenset())
+    counts = kept.groupby("ticker").size().to_dict()
+    assert counts == {"TDA": 40, "MRVI": 500}     # 12% cashtags would pass, but jargon wins
+    assert dec.loc["TDA", "decision"] == "cashtags only (WSB jargon)"
+    u = build_universe(["TDA"])
+    assert [x.ticker for x in find_tickers("my TDA account, $TDA", u)] == ["TDA"]
+    assert find_tickers("my TDA account", u) == []     # bare jargon blocked at extraction

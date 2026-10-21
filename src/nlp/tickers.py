@@ -49,6 +49,15 @@ CALL CALLS PUT PUTS BUY SELL SHORT LONG BEAR BULL BAG APE APES WSB RH IRA
 NFT PDT HFT MM MMS SI CTB FTD FTDS DRS
 """.split())
 
+# WSB jargon that matches a real symbol and is not a dictionary word, so the
+# word filter misses it. Found by listing tickers with 500+ mentions and under
+# 1% cashtags in 2021 (MRVI, a real stock, also showed up and was kept).
+# Bare mentions are blocked; cashtags ($TDA) still count.
+JARGON = frozenset("""
+TDA IBKR DTC OPEX PPI FSD FTW NGL RBC
+""".split())
+STOPLIST = STOPLIST | JARGON
+
 # Symbols safe to match even in lowercase: distinctive, not English words.
 # Keep this short and deliberate.
 LOWERCASE_OK = frozenset("""
@@ -215,7 +224,7 @@ def predict(
 def load_cashtag_only(decisions_csv: str | Path) -> frozenset[str]:
     """Tickers limited to cashtags, from the decisions file `finalize` writes."""
     d = pd.read_csv(decisions_csv, index_col=0)
-    return frozenset(d.index[d["decision"] == "cashtags only"])
+    return frozenset(d.index[d["decision"].str.startswith("cashtags only")])
 
 
 def sample_for_labeling(
@@ -265,6 +274,7 @@ def drop_ambiguous(
     min_cashtag_share: float = 0.05,
     min_cashtags: int = 20,
     exclude: frozenset[str] = EXCLUDE,
+    jargon: frozenset[str] = JARGON,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Remove non-cashtag mentions of tickers that are probably just words.
 
@@ -290,13 +300,15 @@ def drop_ambiguous(
     mentions = mentions[~excluded]
     st = ticker_source_stats(mentions)
     idx = st.index.to_series()
-    ambiguous = (idx.isin(common_words) | (idx.str.len() == 2)) & ~idx.isin(allow)
-    passes = (st["cashtag_share"] >= min_cashtag_share) & (st["cashtag"] >= min_cashtags)
+    is_jargon = idx.isin(jargon)
+    ambiguous = ((idx.isin(common_words) | (idx.str.len() == 2)) & ~idx.isin(allow)) | is_jargon
+    passes = (st["cashtag_share"] >= min_cashtag_share) & (st["cashtag"] >= min_cashtags) & ~is_jargon
     st["ambiguous"] = ambiguous
     st["decision"] = "keep"
     st.loc[ambiguous & passes, "decision"] = "keep (cashtag evidence)"
     st.loc[ambiguous & ~passes, "decision"] = "cashtags only"
-    cashtag_only = set(st.index[st["decision"] == "cashtags only"])
+    st.loc[is_jargon, "decision"] = "cashtags only (WSB jargon)"
+    cashtag_only = set(st.index[st["decision"].str.startswith("cashtags only")])
     drop = mentions["ticker"].isin(cashtag_only) & (mentions["source"] != "cashtag")
     st["dropped"] = mentions[drop].groupby("ticker").size().reindex(st.index, fill_value=0)
     decisions = st[st["ambiguous"]].sort_values("total", ascending=False)
@@ -347,7 +359,7 @@ def finalize(mentions: pd.DataFrame, out_dir: str | Path, **filter_kwargs) -> pd
     daily.to_parquet(out_dir / "daily_mentions.parquet", index=False)
     dropped = n_in - len(kept)
     print(f"ambiguity filter: dropped {dropped:,} of {n_in:,} mentions ({dropped / max(n_in, 1):.1%}); "
-          f"{(decisions['decision'] == 'cashtags only').sum():,} tickers limited to cashtags; "
+          f"{decisions['decision'].str.startswith('cashtags only').sum():,} tickers limited to cashtags; "
           f"excluded: {', '.join(decisions.index[decisions['decision'].str.startswith('excluded')]) or 'none'}")
     return daily
 
