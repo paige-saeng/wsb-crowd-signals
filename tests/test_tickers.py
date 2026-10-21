@@ -246,3 +246,12 @@ def test_load_labels_xlsx_and_csv(tmp_path):
         out = load_labels(path)
         assert out["id"].tolist() == ["a1", "a2"]          # example and unchecked rows skipped
         assert score_labels(out)["tp"] == 1 and score_labels(out)["fp"] == 0
+
+
+def test_repredict_uses_current_pipeline():
+    from src.nlp.tickers import repredict
+    lab = pd.DataFrame({"text": ["WISH and WKHS", "nothing"], "predicted": ["WKHS", ""],
+                        "true_tickers": ["WISH WKHS", ""]})
+    new = repredict(lab, build_universe(["WISH", "WKHS"]))
+    assert new["predicted"].tolist() == ["WISH WKHS", ""]
+    assert score_labels(new)["recall"] == 1.0

@@ -64,37 +64,53 @@ In Phase 2 the ticker list will come from the tickers WSB actually mentions.
 
 ## Phase 2: ticker extraction
 
-1. Download the free NASDAQ Trader symbol lists into `data/raw/`:
-   [nasdaqlisted.txt](https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt) and
-   [otherlisted.txt](https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt).
-   They list only stocks listed *today*, so add delisted meme names with `--extra`.
-2. Run the extractor on the Phase 1 output:
+**Ticker universe (point in time).** `data/reference/tickers_2021.csv` lists every
+NASDAQ/NYSE/AMEX symbol seen in daily snapshots from 2021-01-30 to 2022-01-29
+(9,077 tickers), so 2021 names later renamed or delisted (WISH, DWAC, CCIV, BBBY)
+are still recognized. Rebuild it with:
+
+```bash
+python -m src.data.universe --start 2021-01-01 --end 2022-01-31 --out data/reference/tickers_2021.csv
+```
+
+Optionally also download today's NASDAQ Trader lists into `data/raw/` and pass
+them with `--symbols`:
+[nasdaqlisted.txt](https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt),
+[otherlisted.txt](https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt).
+
+**Run the extractor** on the Phase 1 output:
 
 ```bash
 python -m src.nlp.tickers \
   --inputs data/interim/posts.parquet data/interim/comments.parquet \
+  --universe-csv data/reference/tickers_2021.csv \
   --symbols data/raw/nasdaqlisted.txt data/raw/otherlisted.txt \
-  --extra BBBY --out data/processed
+  --out data/processed
 ```
 
-Writes `data/processed/mentions.parquet` (one row per post/comment and ticker)
-and `data/processed/daily_mentions.parquet` (mentions and unique authors per
-ticker per trading day), and prints the top 20 tickers.
+Writes `mentions_raw.parquet` (before filtering), `mentions.parquet`,
+`daily_mentions.parquet` (mentions and unique authors per ticker per trading
+day), and `ambiguous_ticker_decisions.csv`. To redo only the filter step:
+`python -m src.nlp.tickers --skip-extract --out data/processed`.
 
 **How matching works:** cashtags (`$GME`) always count; bare ALL-CAPS symbols
-count unless they're on a stoplist of words and slang (DD, YOLO, CEO, ALL, IT…);
-a short list of distinctive symbols (gme, amc, pltr…) also counts in lowercase.
-Links, emails, and r/ or u/ references are ignored. Each ticker counts once per
-post or comment.
+count unless on a stoplist of slang (DD, YOLO, CEO…); a short list of distinctive
+symbols (gme, amc, pltr…) also counts in lowercase. Links, emails, r/ and u/
+references are ignored; contractions (DON'T) don't match. Each ticker counts once
+per post or comment. Then the **ambiguity filter**: tickers that are common
+English words or two letters keep their non-cashtag mentions only if at least 5%
+of their mentions are cashtags (and 20+ cashtags). Joke cashtags ($ROPE) are
+excluded.
 
-**Validate it (required before trusting results):** draw a sample, hand-label
-it, and measure precision and recall.
+**Validation:** 300 hand-labeled texts in `data/labels/label_sample.xlsx`.
+Score the current pipeline against them:
 
 ```python
-from src.nlp.tickers import sample_for_labeling, score_labels
-sample_for_labeling(comments, universe, n=300).to_csv("data/interim/label_sample.csv", index=False)
-# fill the true_tickers column in Excel/Sheets, then:
-score_labels(pd.read_csv("data/interim/label_sample_labeled.csv"))
+from src.nlp.tickers import load_labels, repredict, score_labels, load_cashtag_only, build_universe
+from src.data.universe import load_universe_csv
+u = build_universe(load_universe_csv("data/reference/tickers_2021.csv"))
+co = load_cashtag_only("data/processed/ambiguous_ticker_decisions.csv")
+score_labels(repredict(load_labels("data/labels/label_sample.xlsx"), u, co))
 ```
 
 ## The timestamp rule (lookahead bias)

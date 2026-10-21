@@ -362,8 +362,11 @@ def main(argv=None):
                "data/raw/otherlisted.txt --extra BBBY --out data/processed",
     )
     p.add_argument("--inputs", nargs="+")
-    p.add_argument("--symbols", nargs="+",
+    p.add_argument("--symbols", nargs="+", default=[],
                    help="NASDAQ Trader nasdaqlisted.txt / otherlisted.txt files")
+    p.add_argument("--universe-csv", nargs="+", default=[],
+                   help="CSV(s) with a `ticker` column, e.g. data/reference/tickers_2021.csv "
+                        "from src.data.universe; combined with --symbols")
     p.add_argument("--extra", nargs="*", default=["BBBY"],
                    help="Delisted or missing tickers to add to the universe")
     p.add_argument("--out", default="data/processed")
@@ -375,9 +378,12 @@ def main(argv=None):
         raw = pd.read_parquet(Path(args.out) / "mentions_raw.parquet")
         daily = finalize(raw, args.out)
     else:
-        if not args.inputs or not args.symbols:
-            p.error("--inputs and --symbols are required unless --skip-extract")
-        universe = build_universe(load_nasdaqtrader(*args.symbols), extra=args.extra)
+        if not args.inputs or not (args.symbols or args.universe_csv):
+            p.error("--inputs and --symbols or --universe-csv are required unless --skip-extract")
+        symbols = set(load_nasdaqtrader(*args.symbols)) if args.symbols else set()
+        for path in args.universe_csv:
+            symbols |= set(pd.read_csv(path, dtype=str)["ticker"].dropna().str.upper())
+        universe = build_universe(symbols, extra=args.extra)
         print(f"universe: {len(universe):,} symbols")
         daily = run_on_parquet(args.inputs, universe, args.out)
     top = daily.groupby("ticker")["mentions"].sum().sort_values(ascending=False).head(20)
@@ -398,6 +404,19 @@ def load_labels(path: str | Path, sheet: str = "Label") -> pd.DataFrame:
     if "checked" in df.columns:
         df = df[df["checked"].fillna("").str.strip().str.lower() == "x"]
     return df.fillna({"predicted": "", "true_tickers": ""})
+
+
+def repredict(
+    labeled: pd.DataFrame,
+    universe: frozenset[str],
+    cashtag_only: frozenset[str] = frozenset(),
+    exclude: frozenset[str] = EXCLUDE,
+) -> pd.DataFrame:
+    """Recompute `predicted` from each row's text with the CURRENT pipeline, so
+    the same hand labels can score a new version (new universe, new filter)."""
+    out = labeled.copy()
+    out["predicted"] = out["text"].map(lambda t: " ".join(predict(t, universe, cashtag_only, exclude)))
+    return out
 
 
 def score_labels(labeled: pd.DataFrame) -> dict:
