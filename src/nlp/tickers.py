@@ -69,6 +69,13 @@ CLOV SNDL TLRY RKT MVIS SPCE CLNE WKHS UWMC
 # "$ROPE" is WSB dark humor about losses (88% of its 2021 mentions are cashtags).
 EXCLUDE = frozenset({"ROPE"})
 
+# Crypto symbols that collide with stock tickers. On WSB "BTC" or "XRP" means
+# the coin, not the stock with that symbol, so these are not stock mentions.
+CRYPTO = frozenset("""
+BTC ETH XRP SOL TRX VET LTC BCH LINK ATOM EOS DOGE ADA SHIB DOT XLM ETC BNB
+MATIC AVAX ALGO XMR UNI
+""".split())
+
 CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Za-z]{1,5})(?![\w])")
 BARE_UPPER_RE = re.compile(r"(?<![\w$])(?<![A-Za-z]['’])([A-Z]{2,5})(?![\w])(?!['’](?![sS]\b)[A-Za-z])")
 BARE_ANY_RE = re.compile(r"(?<![\w$])(?<![A-Za-z]['’])([A-Za-z]{2,5})(?![\w])(?!['’](?![sS]\b)[A-Za-z])")
@@ -205,7 +212,7 @@ def predict(
     text: str | None,
     universe: frozenset[str],
     cashtag_only: frozenset[str] = frozenset(),
-    exclude: frozenset[str] = EXCLUDE,
+    exclude: frozenset[str] = EXCLUDE | CRYPTO,
 ) -> list[str]:
     """What the FULL pipeline outputs for one text: extraction, then the
     ambiguity filter (`cashtag_only` = tickers whose decision was
@@ -231,7 +238,7 @@ def sample_for_labeling(
     df: pd.DataFrame, universe: frozenset[str], n: int = 300, seed: int = 0,
     text_cols: tuple[str, ...] = ("title", "text"),
     cashtag_only: frozenset[str] = frozenset(),
-    exclude: frozenset[str] = EXCLUDE,
+    exclude: frozenset[str] = EXCLUDE | CRYPTO,
 ) -> pd.DataFrame:
     """Random sample with the pipeline's predictions and an empty column for
     your hand labels. Fill `true_tickers` (space-separated, blank if none),
@@ -275,6 +282,7 @@ def drop_ambiguous(
     min_cashtags: int = 20,
     exclude: frozenset[str] = EXCLUDE,
     jargon: frozenset[str] = JARGON,
+    crypto: frozenset[str] = CRYPTO,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Remove non-cashtag mentions of tickers that are probably just words.
 
@@ -295,7 +303,7 @@ def drop_ambiguous(
     """
     if common_words is None:
         common_words = load_common_words()
-    excluded = mentions["ticker"].isin(exclude)
+    excluded = mentions["ticker"].isin(exclude | crypto)
     n_excluded = mentions[excluded].groupby("ticker").size()
     mentions = mentions[~excluded]
     st = ticker_source_stats(mentions)
@@ -313,8 +321,9 @@ def drop_ambiguous(
     st["dropped"] = mentions[drop].groupby("ticker").size().reindex(st.index, fill_value=0)
     decisions = st[st["ambiguous"]].sort_values("total", ascending=False)
     if len(n_excluded):
+        reason = ["excluded (crypto)" if t in crypto else "excluded (joke cashtag)" for t in n_excluded.index]
         ex = pd.DataFrame({"total": n_excluded, "dropped": n_excluded,
-                           "ambiguous": True, "decision": "excluded (joke cashtag)"})
+                           "ambiguous": True, "decision": reason})
         decisions = pd.concat([ex, decisions])
     return mentions[~drop].reset_index(drop=True), decisions
 
@@ -422,7 +431,7 @@ def repredict(
     labeled: pd.DataFrame,
     universe: frozenset[str],
     cashtag_only: frozenset[str] = frozenset(),
-    exclude: frozenset[str] = EXCLUDE,
+    exclude: frozenset[str] = EXCLUDE | CRYPTO,
 ) -> pd.DataFrame:
     """Recompute `predicted` from each row's text with the CURRENT pipeline, so
     the same hand labels can score a new version (new universe, new filter)."""

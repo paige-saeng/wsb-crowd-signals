@@ -268,3 +268,12 @@ def test_jargon_is_cashtag_only_even_with_no_word_match():
     u = build_universe(["TDA"])
     assert [x.ticker for x in find_tickers("my TDA account, $TDA", u)] == ["TDA"]
     assert find_tickers("my TDA account", u) == []     # bare jargon blocked at extraction
+
+
+def test_crypto_symbols_are_not_stock_mentions():
+    from src.nlp.tickers import drop_ambiguous, predict
+    m = make_mentions([("BTC", "cashtag", 50), ("XRP", "bare", 80), ("GME", "bare", 5)])
+    kept, dec = drop_ambiguous(m, common_words=frozenset())
+    assert set(kept["ticker"]) == {"GME"}
+    assert dec.loc["BTC", "decision"] == "excluded (crypto)"
+    assert predict("buying $BTC and GME", build_universe(["BTC", "GME"])) == ["GME"]

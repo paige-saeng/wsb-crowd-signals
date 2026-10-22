@@ -113,6 +113,34 @@ co = load_cashtag_only("data/processed/ambiguous_ticker_decisions.csv")
 score_labels(repredict(load_labels("data/labels/label_sample.xlsx"), u, co))
 ```
 
+## Phase 3-4: does attention predict volatility and volume? (H1, H2)
+
+1. Download prices for the 361 study tickers (500+ mentions on 30+ days in 2021),
+   plus SPY, with a year of history before 2021 for baselines:
+
+```bash
+python -m src.data.prices --ticker-file data/processed/study_tickers.txt \
+  --start 2020-06-01 --end 2022-02-01 --out data/raw/prices.parquet
+```
+
+2. Build the stock-day panel (features on day t, outcomes on day t+1):
+
+```bash
+python -m src.features.panel
+```
+
+3. Run the regressions (two-way fixed effects, errors clustered by stock and date):
+
+```bash
+python -m src.analysis.attention
+```
+
+Results print to the terminal and save to `reports/tables/attention_results.csv`.
+Each hypothesis runs on the full sample, without GME and AMC, without the
+Jan-Feb squeeze, and on each half of 2021, plus alternative attention measures.
+`tests/test_panel_attention.py` checks the method on simulated markets with a
+known answer: it must find a planted effect and must not find one that isn't there.
+
 ## The timestamp rule (lookahead bias)
 
 Every post and comment gets a `trading_day`: **the first trading session whose
