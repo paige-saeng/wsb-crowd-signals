@@ -141,6 +141,36 @@ Jan-Feb squeeze, and on each half of 2021, plus alternative attention measures.
 `tests/test_panel_attention.py` checks the method on simulated markets with a
 known answer: it must find a planted effect and must not find one that isn't there.
 
+## Phase 4: event study of hype spikes (H4)
+
+What happens to a stock's price before, on, and after a WSB hype spike?
+
+```bash
+python -m src.analysis.event_study
+```
+
+- **Event:** a stock-day with attention at least 3 standard deviations above the
+  stock's own 30-day norm and at least 10 mentions. Spikes within 20 trading
+  days of the stock's previous spike belong to the same episode.
+- **Abnormal return:** beta-only model (stock return minus beta x SPY return),
+  beta estimated on days -250 to -30 before each event, alpha set to 0. WSB
+  stocks' late-2020 rally gives them a large estimated alpha (+0.26%/day), which
+  the full market model would subtract every day and turn into a fake ~5%
+  decline over 20 days. Market-adjusted and full-market-model results are
+  reported as variants.
+- **Windows:** before (-10,-1), day 0, next day, next week (+1,+5), next month
+  (+1,+20). Days +1 onward are what a trader could act on after the spike.
+- **Inference:** winsorized means with standard errors clustered by event date
+  (many stocks spike on the same day), plus medians and share positive.
+- **Groups:** all events, price up vs down on day 0, without GME and AMC,
+  without the Jan-Feb squeeze.
+
+Outputs: `reports/tables/event_study_car.csv` (windows x groups),
+`reports/tables/event_study_path.csv` (average cumulative abnormal return by
+day, with 95% bands), `data/processed/event_returns.parquet` (per event and day).
+`tests/test_event_study.py` plants a known jump-then-reversal in simulated
+stocks and checks it is recovered, and that no reversal is found when none exists.
+
 ## The timestamp rule (lookahead bias)
 
 Every post and comment gets a `trading_day`: **the first trading session whose
