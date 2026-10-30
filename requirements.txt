@@ -7,6 +7,9 @@ yfinance>=0.2.40
 pandas_market_calendars>=4.4
 openpyxl>=3.1           # reading the labeling spreadsheet
 
+# Phase 2: sentiment
+vaderSentiment>=3.3
+
 # Phase 3-4: panel regressions
 statsmodels>=0.14
 linearmodels>=6.0
@@ -18,8 +21,8 @@ matplotlib
 
 # Later phases (uncomment when you get there)
 # wordfreq            # only to regenerate src/nlp/data/common_words.txt
-# vaderSentiment
-# transformers
+
+# transformers        # optional: FinBERT on the labeled sample
 # torch
 # bertopic
 # datasketch          # MinHash for near-duplicate text
