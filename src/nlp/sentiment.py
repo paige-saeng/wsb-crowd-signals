@@ -178,12 +178,26 @@ def confusion(true: pd.Series, pred: pd.Series) -> pd.DataFrame:
 
 
 def load_sentiment_labels(path: str | Path, sheet: str = "Label") -> pd.DataFrame:
-    """Checked rows of a filled-in sentiment labeling file (.xlsx or .csv)."""
+    """Labeled rows of a filled-in sentiment labeling file (.xlsx, .numbers or .csv).
+
+    Files with a `checked` column keep only rows marked x; files without one
+    (the training sample) keep every row with a label."""
     path = Path(path)
-    df = pd.read_excel(path, sheet_name=sheet, dtype=str) if path.suffix == ".xlsx" else pd.read_csv(path, dtype=str)
+    if path.suffix == ".numbers":
+        from numbers_parser import Document   # pip install numbers-parser
+        doc = Document(str(path))
+        rows = next(s for s in doc.sheets if s.name == sheet).tables[0].rows(values_only=True)
+        df = pd.DataFrame(rows[1:], columns=rows[0]).astype("string").astype(object)
+    elif path.suffix == ".xlsx":
+        df = pd.read_excel(path, sheet_name=sheet, dtype=str)
+    else:
+        df = pd.read_csv(path, dtype=str)
     df.columns = [str(c).strip().lower() for c in df.columns]
     df = df[df["id"].fillna("").str.upper() != "EXAMPLE"]
-    df = df[df["checked"].fillna("").str.strip().str.lower() == "x"]
+    if "checked" in df.columns:
+        df = df[df["checked"].fillna("").str.strip().str.lower() == "x"]
+    else:
+        df = df[df["label"].fillna("").str.strip() != ""]
     df["label"] = df["label"].fillna("").str.strip().str.lower()
     bad = df[~df["label"].isin(LABELS)]
     if len(bad):
@@ -196,7 +210,7 @@ def evaluate_file(path: str | Path, with_finbert: bool = False) -> pd.DataFrame:
     of the spreadsheet (so it cannot sway labeling) and read from
     sentiment_sample_raw.csv in the same folder, when present."""
     lab = load_sentiment_labels(path)
-    raw = Path(path).with_name("sentiment_sample_raw.csv")
+    raw = Path(path).with_name(f"{Path(path).stem}_raw.csv")
     if "stratum" not in lab.columns and raw.exists():
         lab = lab.merge(pd.read_csv(raw, dtype=str)[["id", "stratum"]], on="id", how="left")
     scores = {name: lab["text"].map(f) for name, f in SCORERS.items()}
@@ -213,6 +227,142 @@ def evaluate_file(path: str | Path, with_finbert: bool = False) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ------------------------------------------------------------------ training sample
+
+# Words that often signal a bearish view. Used ONLY to oversample likely-bearish
+# texts (bearish is rare, ~7% of the test labels); the labeler never sees which
+# rows were picked this way, and every label is still the human's judgment.
+BEARISH_HINT = re.compile(
+    r"\b(?:puts?|short(?:ing|ed)?|sell(?:ing)?|sold|dump(?:ing|ed)?|crash(?:ing)?|drill(?:ing)?|tank(?:ing)?|"
+    r"overvalued|bag ?holders?|bubble|dead|to zero|bear(?:ish)?|red|drop(?:ping)?|fall(?:ing)?)\b", re.I)
+EMPTY_BODIES = {"", "[deleted]", "[removed]"}
+MAX_CHARS = 1500
+
+
+def display_text(kind: str, title, text) -> str:
+    """What the labeler sees: post = title + body, comment = body; cut at MAX_CHARS."""
+    title = title if isinstance(title, str) else ""
+    text = text if isinstance(text, str) else ""
+    out = f"{title}\n \n{text}" if kind == "post" and title else text
+    return out[:MAX_CHARS]
+
+
+def single_ticker_ids(mentions: pd.DataFrame, study: set[str]) -> pd.DataFrame:
+    """id, kind, trading_day, ticker for texts that mention exactly one study stock,
+    so each label is unambiguously about one ticker."""
+    m = mentions[mentions["ticker"].isin(study)]
+    n = m.groupby("id")["ticker"].transform("nunique")
+    return m[n == 1].drop_duplicates("id")[["id", "kind", "trading_day", "ticker"]]
+
+
+def draw_training_sample(pool: pd.DataFrame, n: int = 1000, bearish_share: float = 0.3,
+                         exclude_ids=(), exclude_texts=(), seed: int = 1) -> pd.DataFrame:
+    """Random texts plus an oversample of bearish-looking ones, shuffled.
+
+    `pool` needs id, kind, trading_day, ticker, text (the display text).
+    Texts whose id or exact text is in the test set are excluded, so the test
+    labels stay unseen (the same comment posted twice would otherwise leak)."""
+    ex_text = {t.strip() for t in exclude_texts if isinstance(t, str)}
+    p = pool[~pool["id"].isin(set(exclude_ids))]
+    p = p[~p["text"].fillna("").str.strip().isin(ex_text)]
+    p = p[~p["text"].fillna("").str.strip().isin(EMPTY_BODIES)]
+    p = p.drop_duplicates("text")
+    k_bear = int(round(n * bearish_share))
+    rnd = p.sample(min(n - k_bear, len(p)), random_state=seed).assign(stratum="random")
+    rest = p[~p["id"].isin(rnd["id"])]
+    hint = rest[rest["text"].str.contains(BEARISH_HINT, na=False)]
+    bear = hint.sample(min(k_bear, len(hint)), random_state=seed).assign(stratum="bearish keyword")
+    out = pd.concat([rnd, bear]).sample(frac=1, random_state=seed).reset_index(drop=True)
+    return out[["id", "kind", "trading_day", "ticker", "stratum", "text"]]
+
+
+def load_pool_texts(ids: pd.DataFrame, interim: str | Path = "data/interim") -> pd.DataFrame:
+    """Attach display text to candidate ids, streaming the parquet files in
+    batches so 13M comments never sit in memory at once."""
+    import pyarrow.dataset as ds
+
+    want = set(ids["id"])
+    parts = []
+    for name in ("posts", "comments"):
+        d = ds.dataset(Path(interim) / f"{name}.parquet")
+        for b in d.to_batches(columns=["id", "kind", "title", "text"], filter=ds.field("id").isin(list(want))):
+            parts.append(b.to_pandas())
+    t = pd.concat(parts, ignore_index=True)
+    t["text"] = [display_text(k, ti, tx) for k, ti, tx in zip(t["kind"], t["title"], t["text"])]
+    return ids.merge(t[["id", "text"]], on="id", how="inner")
+
+
+LEARNED_RULES = [
+    "Rules learned while labeling the first 300 (keep using them so both sets match)",
+    "Options: buying calls or selling puts = bullish; buying puts or selling calls = bearish. Check whose position it is: "
+    "'Melvin's puts expire, shorts must buy back' is bullish.",
+    "Squeeze talk is bullish on the stock, even when the anger is aimed at short sellers.",
+    "Buy-the-dip is bullish: a dip someone wants so they can buy more, or a drop they will buy into.",
+    "Venting about a move that already happened is neutral ('TLRY getting annihilated'); a reason it will keep "
+    "going is directional ('no buyers at these levels' is bearish).",
+    "A position decides the label, the tone sets how strong: 'bought UWMC, everything I touch dies' is bullish.",
+    "Selling one stock to fund another is neutral for the stock sold, unless they say it is bad.",
+    "Price targets need that day's price: 'SPY 435 Monday' was bearish when SPY closed at 443. Note the row in "
+    "notes if you are unsure, and it can be checked against the price data.",
+    "Deleted bodies: label the title if it has a direction, otherwise neutral. Replies you cannot read without "
+    "their parent are neutral.",
+    "Hedges and P&L updates with no view are neutral; a hedge with a stated expectation follows the expectation.",
+]
+
+
+def write_label_workbook(sample: pd.DataFrame, template: str | Path, out: str | Path,
+                         title: str, summary: str) -> None:
+    """Copy the labeling template's layout (instructions, dropdown, progress)
+    to a new sample. No `checked` column: a row counts once it has a label."""
+    from copy import copy
+    from openpyxl import load_workbook
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    wb = load_workbook(template)
+    ws = wb["Label"]
+    style = {c.column: (copy(c.font), copy(c.fill), copy(c.alignment), copy(c.border))
+             for c in ws[3]}                          # first data row = style source
+    height = ws.row_dimensions[3].height
+    ws.delete_rows(3, ws.max_row)
+    ws.delete_cols(8)                                 # drop `checked`; notes moves to H
+    ws.data_validations.dataValidation = []
+    last = 2 + len(sample)
+    for i, r in enumerate(sample.itertuples(index=False), start=1):
+        row = 2 + i
+        vals = [i, r.id, r.kind, str(r.trading_day)[:10], r.ticker, r.text, None, None]
+        for col, v in enumerate(vals, start=1):
+            c = ws.cell(row, col, v)
+            f, fi, al, bo = style[col if col < 8 else 9]
+            c.font, c.fill, c.alignment, c.border = copy(f), copy(fi), copy(al), copy(bo)
+        ws.row_dimensions[row].height = height
+    dv = DataValidation(type="list", formula1='"bullish,bearish,neutral"', allow_blank=True)
+    dv.add(f"G3:G{last}")
+    ws.add_data_validation(dv)
+
+    pr = wb["Progress"]
+    pr["B3"] = f"=COUNTA(Label!B3:B{last})"
+    pr["A4"], pr["B4"] = "Rows labeled", f'=COUNTIF(Label!G3:G{last},"?*")'
+    for cell, lab in (("B7", "bullish"), ("B8", "bearish"), ("B9", "neutral")):
+        pr[cell] = f'=COUNTIF(Label!G3:G{last},"{lab}")'
+    pr["A10"], pr["B10"] = None, None
+
+    how = wb["How to label"]
+    how["A1"] = title
+    how["A3"] = ("Why: these labels train a sentiment model. Your first 300 labels stay untouched as the test set "
+                 "that grades it.")
+    how["A20"] = "Pick a label from the dropdown. A row counts as done once it has a label, so you can stop anytime."
+    how["A21"] = ("Save as .xlsx with the same name when done (if using Numbers: File > Export To > Excel), "
+                  "or just tell Claude and the .numbers file can be read directly.")
+    how["A24"] = f"python -m src.nlp.sentiment evaluate --labels {Path(out).as_posix()}"
+    how["A26"] = summary
+    head = copy(how["A12"].font)
+    for k, line in enumerate(LEARNED_RULES):
+        c = how.cell(29 + k, 1, line)
+        c.font = head if k == 0 else copy(how["A13"].font)
+        c.alignment = copy(how["A13"].alignment)
+    wb.save(out)
+
+
 # ------------------------------------------------------------------ CLI
 
 def main(argv=None):
@@ -222,7 +372,37 @@ def main(argv=None):
     e.add_argument("--labels", default="data/labels/sentiment_sample.xlsx")
     e.add_argument("--finbert", action="store_true", help="Also score with FinBERT (slow, large download)")
     e.add_argument("--out", default="reports/tables/sentiment_eval.csv")
+    s = sub.add_parser("sample", help="Draw a new sample to hand-label (training set)")
+    s.add_argument("--n", type=int, default=1000)
+    s.add_argument("--bearish-share", type=float, default=0.3)
+    s.add_argument("--exclude", default="data/labels/sentiment_sample_raw.csv",
+                   help="Test-set sample whose ids and texts must not reappear")
+    s.add_argument("--template", default="data/labels/sentiment_sample_blank.xlsx")
+    s.add_argument("--out", default="data/labels/sentiment_train.xlsx")
+    s.add_argument("--seed", type=int, default=1)
     args = p.parse_args(argv)
+
+    if args.cmd == "sample":
+        mentions = pd.read_parquet("data/processed/mentions.parquet", columns=["id", "kind", "trading_day", "ticker"])
+        study = set(Path("data/processed/study_tickers.txt").read_text().split()) - {"SPY"}
+        ids = single_ticker_ids(mentions, study)
+        test = pd.read_csv(args.exclude, dtype=str)
+        # texts only for a random slice of candidates: enough for both strata, far less to read
+        cand = ids[~ids["id"].isin(set(test["id"]))].sample(min(len(ids), 40 * args.n), random_state=args.seed)
+        pool = load_pool_texts(cand)
+        sample = draw_training_sample(pool, args.n, args.bearish_share, test["id"], test["text"], args.seed)
+        raw = Path(args.out).with_name(f"{Path(args.out).stem}_raw.csv")
+        sample.to_csv(raw, index=False)
+        n_post = int((sample["kind"] == "post").sum())
+        write_label_workbook(
+            sample.drop(columns="stratum"), args.template, args.out,
+            title=f"Sentiment training sample: {len(sample):,} WSB texts from 2021",
+            summary=(f"Sample: {len(sample) - n_post:,} comments and {n_post:,} posts mentioning one study stock, "
+                     f"drawn at random across 2021, plus extra texts chosen so bearish views are well represented. "
+                     f"None of the 300 test texts appear here."))
+        print(f"{len(ids):,} single-stock texts in the pool; drew {len(sample):,} "
+              f"({sample['stratum'].value_counts().to_dict()}) -> {args.out}, {raw}")
+        return
 
     if args.cmd == "evaluate":
         res = evaluate_file(args.labels, with_finbert=args.finbert)

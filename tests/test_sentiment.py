@@ -80,3 +80,79 @@ def test_evaluate_file_reads_stratum_from_raw(tmp_path):
     assert set(res["subset"]) == {"all", "random part only"}
     best = res[(res.subset == "all") & (res.scorer == "vader_wsb")].iloc[0]
     assert best["accuracy"] == 1.0 and best["n"] == 4
+
+
+# ------------------------------------------------------------------ training sample
+
+from src.nlp.sentiment import (display_text, draw_training_sample, single_ticker_ids,  # noqa: E402
+                               write_label_workbook)
+
+
+def test_single_ticker_ids_keeps_one_stock_texts():
+    m = pd.DataFrame({"id": ["a", "a", "b", "c", "c"], "kind": "comment", "trading_day": "2021-03-01",
+                      "ticker": ["GME", "AMC", "TSLA", "PLTR", "XYZ"]})
+    out = single_ticker_ids(m, {"GME", "AMC", "TSLA", "PLTR"})
+    assert sorted(out["id"]) == ["b", "c"]          # a has two study stocks; XYZ is not a study stock
+
+
+def test_display_text_post_and_comment():
+    assert display_text("post", "Title", "[deleted]") == "Title\n \n[deleted]"
+    assert display_text("comment", None, "hi") == "hi"
+    assert len(display_text("comment", None, "x" * 5000)) == 1500
+
+
+def _pool(n=400):
+    words = ["buying calls", "loading puts", "what a day", "selling it all"]
+    return pd.DataFrame({"id": [f"i{k}" for k in range(n)], "kind": "comment", "trading_day": "2021-05-03",
+                         "ticker": "GME", "text": [f"{words[k % 4]} {k}" for k in range(n)]})
+
+
+def test_training_sample_excludes_test_ids_and_texts():
+    pool = _pool()
+    pool.loc[5, "text"] = "same comment twice"
+    s = draw_training_sample(pool, n=100, bearish_share=0.3, exclude_ids=["i1", "i2"],
+                             exclude_texts=["same comment twice", "buying calls 8"], seed=0)
+    assert not set(s["id"]) & {"i1", "i2", "i5", "i8"}
+    assert s["id"].is_unique and len(s) == 100
+
+
+def test_training_sample_oversamples_bearish_hints():
+    s = draw_training_sample(_pool(), n=100, bearish_share=0.3, seed=0)
+    assert (s["stratum"] == "bearish keyword").sum() == 30
+    hinted = s[s["stratum"] == "bearish keyword"]["text"]
+    assert hinted.str.contains("puts|selling").all()
+
+
+def test_training_sample_drops_empty_bodies():
+    pool = _pool(50)
+    pool.loc[:9, "text"] = "[deleted]"
+    s = draw_training_sample(pool, n=40, bearish_share=0.0, seed=0)
+    assert not (s["text"] == "[deleted]").any()
+
+
+def test_workbook_roundtrip(tmp_path):
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "How to label"
+    for r in range(1, 28):
+        ws.cell(r, 1, f"line {r}")
+    lab = wb.create_sheet("Label")
+    lab.append(["#", "id", "kind", "date", "ticker", "text", "label", "checked", "notes"])
+    lab.append([None, "EXAMPLE", "comment", "2021-01-27", "GME", "example", "bullish", "x", "not scored"])
+    lab.append([1, "old", "comment", "2021-01-01", "GME", "old text", None, None, None])
+    wb.create_sheet("Progress")
+    tpl = tmp_path / "tpl.xlsx"
+    wb.save(tpl)
+
+    s = draw_training_sample(_pool(), n=20, bearish_share=0.3, seed=0)
+    out = tmp_path / "train.xlsx"
+    write_label_workbook(s.drop(columns="stratum"), tpl, out, "title", "summary")
+    labels = pd.read_excel(out, sheet_name="Label", dtype=str)
+    assert list(labels.columns) == ["#", "id", "kind", "date", "ticker", "text", "label", "notes"]
+    assert len(labels) == 21 and "old" not in set(labels["id"])          # example + 20 new rows
+
+    # a labeled training file loads without a `checked` column
+    labels.loc[1:3, "label"] = ["bullish", "neutral", "bearish"]
+    labels.to_csv(tmp_path / "t.csv", index=False)
+    assert len(load_sentiment_labels(tmp_path / "t.csv")) == 3
