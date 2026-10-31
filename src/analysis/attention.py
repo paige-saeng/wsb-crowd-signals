@@ -59,9 +59,29 @@ def default_specs() -> list[Spec]:
     return s
 
 
+def earnings_specs() -> list[Spec]:
+    """H1/H2 again with earnings controls (needs add_earnings_flags columns).
+
+    'covered' = stocks with any earnings date, no earnings control: the same
+    stocks as the controlled versions, so the change in the attention effect
+    comes from the control, not from a different sample."""
+    s = []
+    for hyp, y, ctrl in (("H1", "abs_ret_next", H1_CONTROLS), ("H2", "abn_vol_next", H2_CONTROLS)):
+        name = "volatility" if hyp == "H1" else "volume"
+        s.append(Spec(f"{hyp} {name} [earnings-covered stocks]", hyp, y, "abn_attn", ctrl, "earnings_covered"))
+        s.append(Spec(f"{hyp} {name} + earnings-day controls", hyp, y, "abn_attn",
+                      ctrl + ["earn_today", "earn_next"], "earnings_covered"))
+        s.append(Spec(f"{hyp} {name} [no earnings within 2 days]", hyp, y, "abn_attn", ctrl, "no_earnings"))
+    return s
+
+
 def select_sample(panel: pd.DataFrame, sample: str) -> pd.DataFrame:
     if sample == "all":
         return panel
+    if sample == "earnings_covered":
+        return panel[panel["earn_today"].notna()]
+    if sample == "no_earnings":
+        return panel[panel["earn_window"] == 0]
     if sample == "no_gme_amc":
         return panel[~panel["ticker"].isin(["GME", "AMC"])]
     if sample == "no_squeeze":   # drop the Jan-Feb 2021 squeeze months
@@ -86,7 +106,8 @@ def fit(panel: pd.DataFrame, spec: Spec) -> dict:
     d = select_sample(panel, spec.sample)[["ticker", "date", *cols]].replace([np.inf, -np.inf], np.nan).dropna()
     d = d.copy()
     for c in cols:
-        d[c] = winsorize(d[c])
+        if d[c].nunique() > 2:            # leave 0/1 flags (earnings days) as they are
+            d[c] = winsorize(d[c])
     d = d.set_index(["ticker", "date"])
     exog = d[list(dict.fromkeys([spec.x, *spec.controls]))]
     res = PanelOLS(d[spec.y], exog, entity_effects=True, time_effects=True,
@@ -128,9 +149,18 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--panel", default="data/processed/panel.parquet")
     p.add_argument("--out", default="reports/tables/attention_results.csv")
+    p.add_argument("--earnings", default="data/raw/earnings_dates.csv",
+                   help="Earnings dates from src.data.earnings; adds controlled specs when the file exists")
     args = p.parse_args(argv)
     panel = pd.read_parquet(args.panel)
-    results = run(panel)
+    specs = default_specs()
+    if Path(args.earnings).exists():
+        from src.data.earnings import add_earnings_flags, reaction_days
+        days = reaction_days(pd.read_csv(args.earnings))
+        panel = add_earnings_flags(panel, days)
+        specs += earnings_specs()
+        print(f"earnings: {len(days):,} reaction days for {days['ticker'].nunique()} stocks")
+    results = run(panel, specs)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     results.to_csv(args.out, index=False)
     print(summarize(results))

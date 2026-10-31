@@ -14,8 +14,8 @@ WSB **attention** carries information about how much a stock will move, but WSB
 
 | Hypothesis | Question | Result |
 | --- | --- | --- |
-| H1 | Does abnormal WSB attention today predict a bigger price move tomorrow? | **Yes.** +1 SD attention: next-day \|return\| 3.5% above typical (t = 6.7) |
-| H2 | ...and more trading volume tomorrow? | **Yes.** +2.7% next-day volume (t = 10.1) |
+| H1 | Does abnormal WSB attention today predict a bigger price move tomorrow? | **Yes, smaller once earnings are controlled.** +1 SD attention: next-day \|return\| 3.5% above typical (t = 6.6); 2.0% with earnings-day controls (t = 3.3), 1.6% outside earnings weeks (t = 2.7) |
+| H2 | ...and more trading volume tomorrow? | **Yes.** +2.7% next-day volume (t = 10.1); +2.0% with earnings controls (t = 8.1) |
 | H3 | Does bullish WSB sentiment predict an up move tomorrow? | **No.** +1 SD sentiment: -0.4 bp (t = -0.1); effects above about 8 bp a day ruled out |
 | H4 | What happens after a hype spike? | Stocks lag by **3.7%** over the next month (t = -3.2, 433 spikes) |
 
@@ -33,6 +33,8 @@ known answer (`tests/`).
   lexicon 0.39, finance-tuned transformers 0.26 to 0.47). A model trained on 755
   hand-labeled WSB texts reaches 0.51 to 0.55 on a separate 300-text test set and
   scored 2.7M texts.
+- Earnings dates: 1,074 announcements for 270 stocks (Yahoo), mapped to the trading
+  day each first moves the price; used as a control for news.
 - Prices: Yahoo Finance for 304 stocks, with symbol-rename recovery; 54 delisted
   names (4% of study mentions) remain missing.
 
@@ -159,9 +161,11 @@ python -m src.data.prices --ticker-file data/processed/study_tickers.txt \
 python -m src.features.panel
 ```
 
-3. Run the regressions (two-way fixed effects, errors clustered by stock and date):
+3. Run the regressions (two-way fixed effects, errors clustered by stock and date).
+   With earnings dates downloaded, earnings-controlled versions are added automatically:
 
 ```bash
+python -m src.data.earnings          # earnings dates, ~5-10 min (Yahoo, rate-limited)
 python -m src.analysis.attention
 ```
 
