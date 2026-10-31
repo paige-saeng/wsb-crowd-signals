@@ -110,3 +110,15 @@ def test_top_features_finds_planted_words():
     bull = " ".join(tf[tf.label == "bullish"]["feature"])
     assert "puts" in bear or "overvalued" in bear or "zero" in bear
     assert "calls" in bull or "moon" in bull or "bought" in bull or "undervalued" in bull
+
+
+def test_finance_model_label_mapping_and_band():
+    from src.nlp.sentiment_model import _map_label, choose_band, probs_to_label
+    assert _map_label("BULLISH") == "bullish" and _map_label("Negative") == "bearish"
+    assert _map_label("NEUTRAL") == "neutral" and _map_label("LABEL_0") is None
+    three = pd.DataFrame({"p_bullish": [0.7, 0.1, 0.2], "p_bearish": [0.2, 0.8, 0.2], "p_neutral": [0.1, 0.1, 0.6]})
+    assert list(probs_to_label(three)) == ["bullish", "bearish", "neutral"]
+    two = pd.DataFrame({"p_bullish": [0.95, 0.05, 0.55], "p_bearish": [0.05, 0.95, 0.45], "p_neutral": float("nan")})
+    assert list(probs_to_label(two, band=0.1)) == ["bullish", "bearish", "neutral"]
+    y = pd.Series(["bullish", "bearish", "neutral"])
+    assert choose_band(two, y) >= 0.05          # a band that makes the 0.55 row neutral wins

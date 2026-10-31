@@ -24,6 +24,7 @@ Usage
     python -m src.nlp.sentiment_model train            # TF-IDF models only
     python -m src.nlp.sentiment_model embed            # step 1: sentence embeddings, saved to disk
     python -m src.nlp.sentiment_model train --embed    # step 2: also train on the saved embeddings
+    python -m src.nlp.sentiment_model finance-models   # finance-specific pretrained models, zero-shot
 
 Embeddings are computed in their own run because on macOS PyTorch and
 LightGBM/scikit-learn in one Python process can crash (segmentation fault).
@@ -207,6 +208,68 @@ def learning_curve(train: pd.DataFrame, test: pd.DataFrame, sizes, C: float, rep
     return pd.DataFrame(rows)
 
 
+# Finance-specific pretrained classifiers (Hugging Face), scored zero-shot.
+HF_MODELS = {
+    "fintwitbert": "StephanAkkerman/FinTwitBERT-sentiment",          # financial tweets
+    "stocktwits-roberta": "zhayunduo/roberta-base-stocktwits-finetuned",  # StockTwits, bullish vs bearish
+}
+
+
+def _map_label(name: str) -> str | None:
+    n = name.lower()
+    if "bull" in n or "pos" in n:
+        return "bullish"
+    if "bear" in n or "neg" in n:
+        return "bearish"
+    if "neut" in n:
+        return "neutral"
+    return None
+
+
+def hf_probs(texts, model: str, batch_size: int = 32) -> pd.DataFrame:
+    """P(bullish), P(bearish), P(neutral) from a Hugging Face text classifier.
+
+    Label names differ by model (BULLISH, Positive, LABEL_1...), so they are
+    mapped by name; a model with only two classes gets p_neutral = NaN."""
+    import os
+    for k, v in {"KMP_DUPLICATE_LIB_OK": "TRUE", "OMP_NUM_THREADS": "1",
+                 "TOKENIZERS_PARALLELISM": "false"}.items():
+        os.environ.setdefault(k, v)
+    from transformers import pipeline
+
+    clf = pipeline("text-classification", model=model, top_k=None, truncation=True, max_length=128, device="cpu")
+    id2label = clf.model.config.id2label
+    mapping = {lab: _map_label(lab) for lab in id2label.values()}
+    if None in mapping.values():
+        raise ValueError(f"cannot map labels {id2label} of {model}; edit _map_label")
+    rows = []
+    texts = [t if isinstance(t, str) else "" for t in texts]
+    for i in range(0, len(texts), batch_size):
+        for res in clf(texts[i:i + batch_size]):
+            p = {"bullish": 0.0, "bearish": 0.0, "neutral": np.nan if "neutral" not in mapping.values() else 0.0}
+            for r in res:
+                p[mapping[r["label"]]] += r["score"]
+            rows.append(p)
+    out = pd.DataFrame(rows).rename(columns=lambda c: f"p_{c}")
+    out.attrs["labels"] = mapping
+    return out
+
+
+def probs_to_label(p: pd.DataFrame, band: float = 0.0) -> pd.Series:
+    """Most likely label; for two-class models, 'neutral' when P(bullish) is
+    within `band` of 0.5 (the model is unsure either way)."""
+    if p["p_neutral"].isna().all():
+        d = p["p_bullish"] - 0.5
+        return pd.Series(np.where(d > band, "bullish", np.where(d < -band, "bearish", "neutral")), index=p.index)
+    return p[["p_bullish", "p_bearish", "p_neutral"]].idxmax(axis=1).str.replace("p_", "", regex=False)
+
+
+def choose_band(p: pd.DataFrame, y: pd.Series, grid=np.arange(0.0, 0.5, 0.025)) -> float:
+    """Neutral band for a two-class model, tuned on the TRAINING labels."""
+    return float(max(grid, key=lambda b: evaluate(y.reset_index(drop=True),
+                                                   probs_to_label(p.reset_index(drop=True), b))["macro_f1"]))
+
+
 def top_features(model, n: int = 20, kinds=("word", "lex")) -> pd.DataFrame:
     """The words and phrases a trained logistic regression leans on most.
 
@@ -284,6 +347,10 @@ def main(argv=None):
     x.add_argument("--model", default="models/sentiment_logreg.joblib")
     x.add_argument("--n", type=int, default=20)
     x.add_argument("--with-char", action="store_true", help="Also show character n-grams")
+    h = sub.add_parser("finance-models", help="Score the test labels with finance-specific pretrained models")
+    h.add_argument("--models", nargs="+", default=list(HF_MODELS))
+    h.add_argument("--train", default="data/labels/sentiment_train.numbers")
+    h.add_argument("--test", default="data/labels/sentiment_sample.xlsx")
     e = sub.add_parser("embed", help="Step 1: encode every labeling-file text and save the vectors")
     e.add_argument("--files", nargs="+", default=["data/labels/sentiment_train.numbers",
                                                    "data/labels/sentiment_sample.xlsx"])
@@ -301,6 +368,37 @@ def main(argv=None):
         wide = tf.assign(cell=tf["feature"] + " (" + tf["weight"].round(2).astype(str) + ")").pivot(
             index="rank", columns="label", values="cell")
         print(wide.to_string())
+        print(f"\n-> {out}")
+        return
+
+    if args.cmd == "finance-models":
+        # Runs alone: PyTorch only, no scikit-learn or LightGBM in this process.
+        train = load_sentiment_labels(args.train)[["text", "label"]].reset_index(drop=True)
+        test = load_sentiment_labels(args.test)[["text", "label"]].reset_index(drop=True)
+        rows = []
+        for key in args.models:
+            name = HF_MODELS.get(key, key)
+            print(f"\n{name}")
+            pte = hf_probs(test["text"], name)
+            print(f"  labels: {pte.attrs['labels']}")
+            row = {"scorer": key, "model": name, "band": np.nan}
+            if pte["p_neutral"].isna().all():        # two-class: tune a neutral band on the training labels
+                ptr = hf_probs(train["text"], name)
+                row["band"] = choose_band(ptr, train["label"])
+                print(f"  two-class model: neutral when |P(bullish) - 0.5| < {row['band']:.3f} "
+                      f"(tuned on {len(train)} training labels)")
+            pred = probs_to_label(pte, 0.0 if np.isnan(row["band"]) else row["band"])
+            row.update(evaluate(test["label"], pred))
+            rows.append(row)
+            print(confusion(test["label"], pred).to_string())
+        res = pd.DataFrame(rows)
+        out = Path("reports/tables/sentiment_finance_models.csv")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        res.to_csv(out, index=False)
+        cols = ["scorer", "macro_f1", "accuracy", "bullish_recall", "bearish_recall", "neutral_recall",
+                "bullish_precision", "bearish_precision"]
+        print("\nScored on the test labels (compare: LightGBM 0.55, logistic regression 0.51):")
+        print(res[cols].round(3).to_string(index=False))
         print(f"\n-> {out}")
         return
 
