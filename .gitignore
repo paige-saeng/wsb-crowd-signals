@@ -19,3 +19,6 @@ venv/
 # OS / editor
 .DS_Store
 .vscode/
+
+# trained models (rebuild with python -m src.nlp.sentiment_model train)
+models/

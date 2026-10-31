@@ -177,11 +177,9 @@ def confusion(true: pd.Series, pred: pd.Series) -> pd.DataFrame:
         index=LABELS, columns=LABELS, fill_value=0)
 
 
-def load_sentiment_labels(path: str | Path, sheet: str = "Label") -> pd.DataFrame:
-    """Labeled rows of a filled-in sentiment labeling file (.xlsx, .numbers or .csv).
-
-    Files with a `checked` column keep only rows marked x; files without one
-    (the training sample) keep every row with a label."""
+def read_label_sheet(path: str | Path, sheet: str = "Label") -> pd.DataFrame:
+    """Every row of a labeling file (.xlsx, .numbers or .csv), labeled or not,
+    with lowercase column names and the example row removed."""
     path = Path(path)
     if path.suffix == ".numbers":
         from numbers_parser import Document   # pip install numbers-parser
@@ -193,7 +191,15 @@ def load_sentiment_labels(path: str | Path, sheet: str = "Label") -> pd.DataFram
     else:
         df = pd.read_csv(path, dtype=str)
     df.columns = [str(c).strip().lower() for c in df.columns]
-    df = df[df["id"].fillna("").str.upper() != "EXAMPLE"]
+    return df[df["id"].fillna("").str.upper() != "EXAMPLE"]
+
+
+def load_sentiment_labels(path: str | Path, sheet: str = "Label") -> pd.DataFrame:
+    """Labeled rows of a filled-in sentiment labeling file (.xlsx, .numbers or .csv).
+
+    Files with a `checked` column keep only rows marked x; files without one
+    (the training sample) keep every row with a label."""
+    df = read_label_sheet(path, sheet)
     if "checked" in df.columns:
         df = df[df["checked"].fillna("").str.strip().str.lower() == "x"]
     else:
