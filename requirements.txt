@@ -19,14 +19,18 @@ pytest>=8
 jupyter
 matplotlib
 
+# Sentiment model
+scikit-learn>=1.4
+lightgbm>=4.0         # macOS: may need `brew install libomp`
+joblib
+numbers-parser       # read labeling files saved from Apple Numbers
+
+# Optional: sentence embeddings and finance-tuned transformers (large: PyTorch)
+# sentence-transformers
+
 # Later phases (uncomment when you get there)
 # wordfreq            # only to regenerate src/nlp/data/common_words.txt
-
-# transformers        # optional: FinBERT on the labeled sample
-# torch
 # bertopic
 # datasketch          # MinHash for near-duplicate text
-# scikit-learn        # Isolation Forest
-# lightgbm
 # alpaca-py           # Phase 7 paper trading
 # python-dotenv

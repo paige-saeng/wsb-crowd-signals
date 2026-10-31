@@ -7,14 +7,44 @@ bot-like accounts followed by a sharper reversal than organic hype?
 The full research design (hypotheses, methods, pitfalls, milestones) lives in
 `RESEARCH_PLAN.md`.
 
-> Status: **Phase 1, setup and data.** Findings will go here as they come in.
+## Results so far (r/wallstreetbets, 2021)
+
+WSB **attention** carries information about how much a stock will move, but WSB
+**sentiment** does not tell you which way.
+
+| Hypothesis | Question | Result |
+| --- | --- | --- |
+| H1 | Does abnormal WSB attention today predict a bigger price move tomorrow? | **Yes.** +1 SD attention: next-day \|return\| 3.5% above typical (t = 6.7) |
+| H2 | ...and more trading volume tomorrow? | **Yes.** +2.7% next-day volume (t = 10.1) |
+| H3 | Does bullish WSB sentiment predict an up move tomorrow? | **No.** +1 SD sentiment: -0.4 bp (t = -0.1); effects above about 8 bp a day ruled out |
+| H4 | What happens after a hype spike? | Stocks lag by **3.7%** over the next month (t = -3.2, 433 spikes) |
+
+All panel results use two-way fixed effects (stock and date) with standard errors
+clustered by stock and by date; every method is checked on simulated data with a
+known answer (`tests/`).
+
+**Data and measurement**
+- 1.4M posts and 13M Daily Discussion comments (Arctic Shift dumps), each mapped to
+  the trading day it could affect (no lookahead).
+- Rule-based ticker extraction: 3.4M mentions, precision 0.96 and recall 0.97 on 300
+  hand-labeled texts. A point-in-time 2021 ticker list recovers renamed and delisted
+  names (8.1% of mentions) that today's listings miss.
+- Sentiment: off-the-shelf scorers read WSB poorly (VADER macro-F1 0.29, a custom WSB
+  lexicon 0.39, finance-tuned transformers 0.26 to 0.47). A model trained on 755
+  hand-labeled WSB texts reaches 0.51 to 0.55 on a separate 300-text test set and
+  scored 2.7M texts.
+- Prices: Yahoo Finance for 304 stocks, with symbol-rename recovery; 54 delisted
+  names (4% of study mentions) remain missing.
+
+Full findings log, decisions and caveats: the project's research doc (`RESEARCH_PLAN.md`
+holds the original design).
 
 ## Setup
 
 ```bash
-conda env create -f environment.yml
-conda activate wsb-crowd-signals
-pytest            # 30 tests, runs offline in a few seconds
+python3 -m venv .venv && source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pytest     # unit tests and known-answer simulations, offline
 ```
 
 ## Phase 1: getting the data
@@ -170,6 +200,37 @@ Outputs: `reports/tables/event_study_car.csv` (windows x groups),
 day, with 95% bands), `data/processed/event_returns.parquet` (per event and day).
 `tests/test_event_study.py` plants a known jump-then-reversal in simulated
 stocks and checks it is recovered, and that no reversal is found when none exists.
+
+## Sentiment model and H3: does WSB tone predict direction?
+
+1. Hand labels: `data/labels/sentiment_sample.xlsx` (300 test texts) and
+   `data/labels/sentiment_train.numbers` (training texts, drawn with
+   `python -m src.nlp.sentiment sample`, never overlapping the test set).
+2. Compare scorers and train models (graded only on the test labels):
+
+```bash
+python -m src.nlp.sentiment evaluate                 # VADER and WSB lexicon
+python -m src.nlp.sentiment_model train              # TF-IDF logistic regression and LightGBM
+python -m src.nlp.sentiment_model explain            # words the model relies on
+python -m src.nlp.sentiment_model embed              # optional: sentence embeddings (PyTorch)
+python -m src.nlp.sentiment_model train --embed
+python -m src.nlp.sentiment_model finance-models     # optional: finance-tuned transformers, zero-shot
+```
+
+On macOS, PyTorch and LightGBM in one Python process can crash, so the embedding
+and transformer steps run as their own commands.
+
+3. Score every text, average per stock per day, and test H3:
+
+```bash
+python -m src.features.sentiment_daily score         # ~2.7M texts, resumable
+python -m src.features.sentiment_daily daily
+python -m src.analysis.direction                     # H3 regressions
+python -m src.analysis.hype_sentiment                # H3 x H4: tone of hype spikes
+```
+
+`sent_net` = mean of P(bullish) - P(bearish) over a stock's texts that day; days
+with fewer than 5 texts are left out.
 
 ## The timestamp rule (lookahead bias)
 
